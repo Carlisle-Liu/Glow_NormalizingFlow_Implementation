@@ -12,7 +12,7 @@ from torchvision.utils import save_image, make_grid
 from torch.utils.data import DataLoader
 from torch.utils.checkpoint import checkpoint
 
-from torchvision.datasets import MNIST
+from torchvision.datasets import MNIST, CIFAR10
 from datasets.celeba import CelebA
 
 
@@ -26,6 +26,7 @@ import time
 import math
 import argparse
 import pprint
+import pdb
 
 
 parser = argparse.ArgumentParser()
@@ -82,23 +83,32 @@ best_eval_logprob = float('-inf')
 
 
 def fetch_dataloader(args, train=True, data_dependent_init=False):
-    args.input_dims = {'mnist': (3,32,32), 'celeba': (3,64,64)}[args.dataset]
+    args.input_dims = {'mnist': (3,32,32), 'celeba': (3,64,64), 'cifar10': (3,32,32)}[args.dataset]
+    # args.input_dims = {'mnist': (1,28,28), 'celeba': (3,64,64)}[args.dataset]
 
     transforms = {'mnist': T.Compose([T.Pad(2),                                         # image to 32x32 same as CIFAR
                                       T.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # random shifts to fill the padded pixels
                                       T.ToTensor(),
                                       T.Lambda(lambda t: t + torch.rand_like(t)/2**8),  # dequantize
                                       T.Lambda(lambda t: t.expand(3,-1,-1))]),          # expand to 3 channels
+    # transforms = {'mnist': T.Compose([T.ToTensor()]), 
 
                   'celeba': T.Compose([T.CenterCrop(148),  # RealNVP preprocessing
                                        T.Resize(64),
                                        T.Lambda(lambda im: np.array(im, dtype=np.float32)),                     # to numpy
-                                       T.Lambda(lambda x: np.floor(x / 2**(8 - args.n_bits)) / 2**args.n_bits), # lower bits
+                                       T.Lambda(lambda x: np.floor(x / 2**(8 - args.n_bits)) / 2 ** args.n_bits), # lower bits
                                        T.ToTensor(),  # note: if input to this transform is uint8, it divides by 255 and returns float
-                                       T.Lambda(lambda t: t + torch.rand_like(t) / 2**args.n_bits)])            # dequantize
+                                       T.Lambda(lambda t: t + torch.rand_like(t) / 2 ** args.n_bits)]),            # dequantize
+                  
+                  'cifar10': T.Compose([
+                    T.RandomAffine(degrees=15, translate=(0.1, 0.1)),
+                                        T.RandomHorizontalFlip(p=0.5),
+                                        T.ToTensor(),
+                                        T.Lambda(lambda t: t + torch.rand_like(t)/2 ** 8)
+                                        ]) #
                   }[args.dataset]
 
-    dataset = {'mnist': MNIST, 'celeba': CelebA}[args.dataset]
+    dataset = {'mnist': MNIST, 'celeba': CelebA, 'cifar10': CIFAR10}[args.dataset]
 
     # load the specific dataset
     dataset = dataset(root=args.data_dir, train=train, transform=transforms, download=True)
@@ -185,9 +195,11 @@ class Invertible1x1Conv(nn.Module):
             u = torch.inverse(self.u * self.l_mask.t() + torch.diag(self.sign_s * self.log_s.exp()))
             w_inv = u @ l @ self.p.inverse()
             logdet = - self.log_s.sum() * H * W
+            pdb.set_trace()
         else:
             w_inv = self.w.inverse()
             logdet = - torch.slogdet(self.w)[-1] * H * W
+            pdb.set_trace()
 
         return F.conv2d(z, w_inv.view(C,C,1,1)), logdet
 
@@ -459,9 +471,14 @@ class Glow(nn.Module):
 
     def log_prob(self, x, bits_per_pixel=False):
         zs, logdet = self.forward(x)
+        # zs is a list of 4 entries, each of which has the shape of (32, 6, 16, 16)
+        # print("The batchsize of the latent variable z is: {}".format(len(zs)))
+        # print("The shape of the latent variable z is: {}".format(zs[0].shape))
         log_prob = sum(self.base_dist.log_prob(z).sum([1,2,3]) for z in zs) + logdet
         if bits_per_pixel:
-            log_prob /= (math.log(2) * x[0].numel())
+            log_prob /= x[0].numel()
+            # log_prob /= (math.log(2) * x[0].numel()) 
+            # x is a list, so that x[0] is an input, and numel() returns the total number of pixels.
         return log_prob
 
 # --------------------
@@ -487,8 +504,10 @@ def train_epoch(model, dataloader, optimizer, writer, epoch, args):
             optimizer.param_groups[0]['lr'] = args.lr * min(1, args.step / (len(dataloader) * args.world_size * args.n_epochs_warmup))
 
         x = x.requires_grad_(True if args.checkpoint_grads else False).to(args.device)  # requires_grad needed for checkpointing
+        # print("The batchsize of the input x is: {}".format(len(x)))
+        # print("The shape of the input x is: {}".format(x[0].shape))
 
-        loss = - model.log_prob(x, bits_per_pixel=True).mean(0)
+        loss = - model.log_prob(x, bits_per_pixel=True).mean(0) # Choose False
 
         optimizer.zero_grad()
         loss.backward()
@@ -515,22 +534,22 @@ def train_epoch(model, dataloader, optimizer, writer, epoch, args):
                     writer.add_scalar('kl_level_{}'.format(j), kl.item(), args.step)
                 writer.add_scalar('train_bits_x', loss.item(), args.step)
 
-        # save and generate
-        if i % args.save_interval == 0:
-            # generate samples
-            samples = generate(model, n_samples=4, z_stds=[0., 0.25, 0.7, 1.0])
-            images = make_grid(samples.cpu(), nrow=4, pad_value=1)
+        # # save and generate
+        # if i % args.save_interval == 0:
+        #     # generate samples
+        #     samples = generate(model, n_samples=4, z_stds=[0., 0.25, 0.7, 1.0])
+        #     images = make_grid(samples.cpu(), nrow=4, pad_value=1)
 
-            # write stats and save checkpoints
-            if args.on_main_process:
-                save_image(images, os.path.join(args.output_dir, 'generated_sample_{}.png'.format(args.step)))
+        #     # write stats and save checkpoints
+        #     if args.on_main_process:
+        #         save_image(images, os.path.join(args.output_dir, 'generated_sample_{}.png'.format(args.step)))
 
-                # save training checkpoint
-                torch.save({'epoch': epoch,
-                            'global_step': args.step,
-                            'state_dict': model.state_dict()},
-                            os.path.join(args.output_dir, 'checkpoint.pt'))
-                torch.save(optimizer.state_dict(), os.path.join(args.output_dir, 'optim_checkpoint.pt'))
+    # save training checkpoint
+    torch.save({'epoch': epoch,
+                'global_step': args.step,
+                'state_dict': model.state_dict()},
+                os.path.join(args.output_dir, 'checkpoint.pt'))
+    torch.save(optimizer.state_dict(), os.path.join(args.output_dir, 'optim_checkpoint.pt'))
 
 
 
