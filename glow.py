@@ -101,10 +101,10 @@ def fetch_dataloader(args, train=True, data_dependent_init=False):
                                        T.Lambda(lambda t: t + torch.rand_like(t) / 2 ** args.n_bits)]),            # dequantize
                   
                   'cifar10': T.Compose([
-                    T.RandomAffine(degrees=15, translate=(0.1, 0.1)),
-                                        T.RandomHorizontalFlip(p=0.5),
+                    # T.RandomAffine(degrees=15, translate=(0.1, 0.1)),
+                                        # T.RandomHorizontalFlip(p=0.5),
                                         T.ToTensor(),
-                                        T.Lambda(lambda t: t + torch.rand_like(t)/2 ** 8)
+                                        # T.Lambda(lambda t: t + torch.rand_like(t)/2 ** 8)
                                         ]) #
                   }[args.dataset]
 
@@ -195,11 +195,11 @@ class Invertible1x1Conv(nn.Module):
             u = torch.inverse(self.u * self.l_mask.t() + torch.diag(self.sign_s * self.log_s.exp()))
             w_inv = u @ l @ self.p.inverse()
             logdet = - self.log_s.sum() * H * W
-            pdb.set_trace()
+            # pdb.set_trace()
         else:
             w_inv = self.w.inverse()
             logdet = - torch.slogdet(self.w)[-1] * H * W
-            pdb.set_trace()
+            # pdb.set_trace()
 
         return F.conv2d(z, w_inv.view(C,C,1,1)), logdet
 
@@ -335,12 +335,22 @@ class Preprocess(nn.Module):
     def __init__(self):
         super().__init__()
 
+    # def forward(self, x):
+    #     logdet = - math.log(256) * x[0].numel() # processing each image dim from [0, 255] to [0,1]; per RealNVP sec 4.1 taken into account
+    #     return x - 0.5, logdet                  # center x at 0
+
+    # def inverse(self, x):
+    #     logdet = math.log(256) * x[0].numel()
+    #     return x + 0.5, logdet
+
     def forward(self, x):
         logdet = - math.log(256) * x[0].numel() # processing each image dim from [0, 255] to [0,1]; per RealNVP sec 4.1 taken into account
+        logdet = logdet * 0.0
         return x - 0.5, logdet                  # center x at 0
 
     def inverse(self, x):
         logdet = math.log(256) * x[0].numel()
+        logdet = logdet * 0.0
         return x + 0.5, logdet
 
 # --------------------
@@ -479,7 +489,7 @@ class Glow(nn.Module):
             log_prob /= x[0].numel()
             # log_prob /= (math.log(2) * x[0].numel()) 
             # x is a list, so that x[0] is an input, and numel() returns the total number of pixels.
-        return log_prob
+        return log_prob 
 
 # --------------------
 # Train and evaluate
@@ -777,6 +787,7 @@ if __name__ == '__main__':
         n_samples = 4
         z_std = [0., 0.25, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] if not args.z_std else n_samples * [args.z_std]
         samples = generate(model, n_samples, z_std)
+        pdb.set_trace()
         images = make_grid(samples.cpu(), nrow=n_samples, pad_value=1)
         save_image(images, os.path.join(args.output_dir,
                                         'generated_samples_at_z_std_{}.png'.format('range' if args.z_std is None else args.z_std)))
